@@ -1,0 +1,123 @@
+import pydicom
+import numpy as np
+import cv2
+import os
+
+
+# -------------------------------
+# LOAD DICOM (SINGLE SLICE)
+# -------------------------------
+def load_dcm(path):
+    ds = pydicom.dcmread(path)
+    img = ds.pixel_array.astype(np.float32)
+    return img
+
+
+# -------------------------------
+# CT WINDOWING (FOR ORIGINAL)
+# -------------------------------
+def window_ct_image(ct_slice, wl=40, ww=400):
+    low = wl - ww // 2
+    high = wl + ww // 2
+    ct = np.clip(ct_slice, low, high)
+    ct = (ct - low) / (high - low)
+    return (ct * 255).astype(np.uint8)
+
+
+# -------------------------------
+# ROI EXTRACTION (MASK BASED)
+# -------------------------------
+def extract_roi_slice(ct_slice, thr_low=450, thr_high=1200,
+                      min_area=50, bottom_frac=0.15):
+
+    h, w = ct_slice.shape
+
+    # Threshold in HU
+    mask = np.logical_and(ct_slice >= thr_low,
+                          ct_slice <= thr_high).astype(np.uint8) * 255
+
+    # Remove bottom band
+    cut = int((1.0 - bottom_frac) * h)
+    mask[cut:, :] = 0
+
+    # Morphology
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, 2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, 2)
+
+    # Contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None, False
+
+    areas = [cv2.contourArea(c) for c in contours]
+    idx = int(np.argmax(areas))
+    if areas[idx] < min_area:
+        return None, False
+
+    cnt = contours[idx]
+
+    roi_mask = np.zeros_like(mask)
+    cv2.drawContours(roi_mask, [cnt], -1, 255, -1)
+
+    # Apply mask (keep HU values)
+    roi = np.zeros_like(ct_slice)
+    roi[roi_mask == 255] = ct_slice[roi_mask == 255]
+
+    return roi, True
+
+
+# -------------------------------
+# MAIN
+# -------------------------------
+if __name__ == "__main__":
+
+    DICOM_ROOT = r"Dataset/Dataset2/Lung_Dx-E0002/Lung_Dx-A0170/12-02-2010-NA-PET03CBMWholebodyFirstHead Adult-02190/9.000000-Thorax  1.0  B31f-46132"
+
+    SAVE_ORG = "Image_Results/DB2/Original"
+    SAVE_ROI = "Image_Results/DB2/ROI"
+
+    os.makedirs(SAVE_ORG, exist_ok=True)
+    os.makedirs(SAVE_ROI, exist_ok=True)
+
+    dcm_files = []
+    for root, _, files in os.walk(DICOM_ROOT):
+        for f in files:
+            if f.lower().endswith(".dcm"):
+                dcm_files.append(os.path.join(root, f))
+
+    img_id = 0
+    roi_count = 0
+
+    for dcm_path in dcm_files:
+        try:
+            ct_slice = load_dcm(dcm_path)
+            if ct_slice.ndim != 2:
+                continue
+
+            # ✅ Correct original save
+            original_img = window_ct_image(ct_slice)
+            cv2.imwrite(
+                os.path.join(SAVE_ORG, f"img_{img_id:04d}.png"),
+                original_img
+            )
+
+            # ROI extraction
+            roi_slice, found = extract_roi_slice(ct_slice)
+
+            if found:
+                roi_img = window_ct_image(roi_slice)
+                cv2.imwrite(
+                    os.path.join(SAVE_ROI, f"img_{img_id:04d}.png"),
+                    roi_img
+                )
+                roi_count += 1
+
+            img_id += 1
+
+        except Exception as e:
+            print("Skipping:", dcm_path, e)
+
+    print(f"Done. ROI extracted for {roi_count} imag
+es.")
