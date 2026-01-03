@@ -1,0 +1,108 @@
+import SimpleITK as sitk
+import numpy as np
+import cv2
+import os
+
+
+# -------------------------------
+# LOAD MHD
+# -------------------------------
+def load_mhd(path):
+    img_itk = sitk.ReadImage(path)
+    arr = sitk.GetArrayFromImage(img_itk)  # (Z, H, W)
+    return arr
+
+
+# -------------------------------
+# ROI EXTRACTION (MASK-BASED)
+# -------------------------------
+def extract_roi_slice(ct_slice, thr_low=-600, thr_high=200, min_area=50):
+    """
+    Returns:
+        roi_img (uint8) : black background + ROI
+        original_img (uint8)
+        found (bool)
+    """
+
+    # Normalize slice to 0–255
+    ct_norm = ct_slice.astype(np.float32)
+    ct_norm = (ct_norm - ct_norm.min()) / (ct_norm.ptp() + 1e-8)
+    ct_uint8 = (ct_norm * 255).astype(np.uint8)
+
+    # Threshold in HU
+    mask = np.logical_and(ct_slice >= thr_low,
+                          ct_slice <= thr_high).astype(np.uint8) * 255
+
+    # Morphological cleaning
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Find contours
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        return None, ct_uint8, False
+
+    # Largest contour
+    areas = [cv2.contourArea(c) for c in contours]
+    max_idx = int(np.argmax(areas))
+    if areas[max_idx] < min_area:
+        return None, ct_uint8, False
+
+    cnt = contours[max_idx]
+
+    # Create ROI mask
+    roi_mask = np.zeros_like(ct_uint8)
+    cv2.drawContours(roi_mask, [cnt], -1, 255, thickness=-1)
+
+    # Apply mask → everything else black
+    roi_img = np.zeros_like(ct_uint8)
+    roi_img[roi_mask == 255] = ct_uint8[roi_mask == 255]
+
+    return roi_img, ct_uint8, True
+
+
+# -------------------------------
+# MAIN
+# -------------------------------
+if __name__ == "__main__":
+
+    ct_path = r"Dataset/Dataset1/subset0/subset0/1.3.6.1.4.1.14519.5.2.1.6279.6001.105756658031515062000744821260.mhd"
+
+    SAVE_ORG = "Image_Results/DB1/Original"
+    SAVE_ROI = "Image_Results/DB1/ROI"
+
+    os.makedirs(SAVE_ORG, exist_ok=True)
+    os.makedirs(SAVE_ROI, exist_ok=True)
+
+    ct_vol = load_mhd(ct_path)
+    num_slices = ct_vol.shape[0]
+
+    print("Total slices:", num_slices)
+
+    saved_count = 0
+
+    for z in range(num_slices):
+
+        ct_slice = ct_vol[z]
+
+        roi_img, original_img, found = extract_roi_slice(
+            ct_slice,
+            thr_low=-600,
+            thr_high=200,
+            min_area=50
+        )
+
+        # Save original slice
+        org_path = os.path.join(SAVE_ORG, f"slice_{z:03d}.png")
+        cv2.imwrite(org_path, original_img)
+
+        # Save ROI slice ONLY if found
+        if found:
+            roi_path = os.path.join(SAVE_ROI, f"slice_{z:03d}.png")
+            cv2.imwrite(roi_path, roi_img)
+            saved_count += 1
+
+    print(f"ROI extracted for {saved_count} slices")
